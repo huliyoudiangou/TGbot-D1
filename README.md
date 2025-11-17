@@ -124,9 +124,9 @@ CREATE TABLE IF NOT EXISTS messages (
 | `BOT_TOKEN` | `123456:AABBCCDDEEFFGGHHIIJJKKLLMMNNOOPP` | 您的 Telegram Bot Token。 |
 | `ADMIN_IDS` | `12345678, 87654321` | 管理员的 Telegram 用户 ID，**多个 ID 用英文逗号分隔！注意注意注意是用户的ID，不是用户名也不是昵称**。 |
 | `ADMIN_GROUP_ID` | `-1001234567890` | 用于接收用户消息的**群组 ID**（注意：必须是群组，且已开启话题功能，普通群组和话题群组的ID不一样）。 |
-| `WORKER_URL` | `https://my-worker.example.workers.dev` | 填写刚才创建**WORKER**的完整URL |
-| `TURNSTILE_SITE_KEY` | `0x4AAAAAAAAA_BBBBDDDFFF` | 填写刚才创建的**Turnstile小组件**的站点密钥 |
-| `TURNSTILE_SECRET_KEY` | `0x4AAAAAAAAA_OlAABBCCDDabcd-ABCD` | 填写刚才创建的**Turnstile小组件**的密钥 |
+| `WORKER_URL` | `https://my-worker.example.workers.dev` | 刚才创建**WORKER**的完整URL |
+| `TURNSTILE_SITE_KEY` | `0x4AAAAAAAAA_BBBBDDDFFF` | 刚才创建的**Turnstile小组件**的站点密钥 |
+| `TURNSTILE_SECRET_KEY` | `0x4AAAAAAAAA_OlAABBCCDDabcd-ABCD` | 刚才创建的**Turnstile小组件**的密钥 |
 
 3.  点击 **保存并部署**。
 
