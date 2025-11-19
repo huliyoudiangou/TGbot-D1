@@ -1,10 +1,11 @@
 /**
- * Telegram Bot Worker v3.11 (Real-time Inbox)
- * 特性: 内存缓存 | D1批处理 | 智能命令 | 聚合收件箱(阅后即焚)
+ * Telegram Bot Worker v3.12 (One Card Edition)
+ * 特性: 内存级防抖 | 自动清理旧卡 | 永远只保留一张通知 | 聚合收件箱
  */
 
 // --- 静态配置与缓存 ---
-const CACHE = { data: {}, ts: 0, ttl: 60000 };
+// 内存缓存结构优化：user_locks 用于毫秒级并发防抖
+const CACHE = { data: {}, ts: 0, ttl: 60000, user_locks: {} };
 const DEFAULTS = {
     welcome_msg: "欢迎！使用前请先完成人机验证。",
     verif_q: "1+1=?\n提示：答案在简介中。", verif_a: "3",
@@ -14,7 +15,6 @@ const DEFAULTS = {
     backup_group_id: "", unread_topic_id: ""
 };
 
-// 消息类型映射
 const MSG_TYPES = [
     { check: m => m.forward_from || m.forward_from_chat, key: 'enable_forward_forwarding', name: "转发消息", extra: m => m.forward_from_chat?.type === 'channel' ? 'enable_channel_forwarding' : null },
     { check: m => m.audio || m.voice, key: 'enable_audio_forwarding', name: "语音/音频" },
@@ -32,7 +32,7 @@ export default {
         
         if (req.method === "GET") {
             if (url.pathname === "/verify") return handleVerifyPage(url, env);
-            if (url.pathname === "/") return new Response("Bot Running v3.11", { status: 200 });
+            if (url.pathname === "/") return new Response("Bot Running v3.12", { status: 200 });
         }
         if (req.method === "POST") {
             if (url.pathname === "/submit_token") return handleTokenSubmit(req, env);
@@ -127,9 +127,7 @@ async function registerCommands(env) {
 async function handleUpdate(update, env, ctx) {
     const msg = update.message || update.edited_message;
     if (!msg) return update.callback_query ? handleCallback(update.callback_query, env) : null;
-    
     if (update.edited_message) return (msg.chat.type === "private") ? handleEdit(msg, env) : null;
-    
     if (msg.chat.type === "private") await handlePrivate(msg, env, ctx);
     else if (msg.chat.id.toString() === env.ADMIN_GROUP_ID) await handleAdminReply(msg, env);
 }
@@ -245,7 +243,7 @@ async function relayToTopic(msg, u, env) {
     }
 }
 
-// --- 收件箱聚合 (优化：按钮带ID) ---
+// --- 收件箱聚合 (One Card 逻辑核心) ---
 async function handleInbox(env, msg, u, tid, uMeta) {
     let inboxId = await getCfg('unread_topic_id', env);
     if (!inboxId) {
@@ -256,20 +254,40 @@ async function handleInbox(env, msg, u, tid, uMeta) {
         } catch { return; }
     }
 
+    // 1. 内存级防抖 (毫秒级并发控制)
     const now = Date.now();
-    if (now - (u.user_info.last_notify || 0) < 300000) return; 
+    if (CACHE.user_locks[u.user_id] && now - CACHE.user_locks[u.user_id] < 5000) return;
+    
+    // 2. 数据库级防抖 (5分钟)
+    const lastNotify = u.user_info.last_notify || 0;
+    if (now - lastNotify < 300000) return; 
+
+    // 锁定内存
+    CACHE.user_locks[u.user_id] = now;
+
+    // 3. 核心逻辑：尝试删除上一张卡片
+    if (u.user_info.inbox_msg_id) {
+        await api(env.BOT_TOKEN, "deleteMessage", { 
+            chat_id: env.ADMIN_GROUP_ID, 
+            message_id: u.user_info.inbox_msg_id 
+        }).catch(() => {}); // 忽略删除失败（比如已经被手动删了）
+    }
 
     const gid = env.ADMIN_GROUP_ID.toString().replace(/^-100/, '');
     const preview = msg.text ? (msg.text.length > 20 ? msg.text.substring(0, 20)+"..." : msg.text) : "[媒体]";
     const card = `<b>🔔 新消息</b>\n${uMeta.card}\n📝 <b>预览:</b> ${escape(preview)}`;
 
     try {
-        await api(env.BOT_TOKEN, "sendMessage", { 
+        const newMsg = await api(env.BOT_TOKEN, "sendMessage", { 
             chat_id: env.ADMIN_GROUP_ID, message_thread_id: inboxId, text: card, parse_mode: "HTML", 
-            // 关键修改：将 user_id 放入按钮数据中
             reply_markup: { inline_keyboard: [[{ text: "🚀 直达回复", url: `https://t.me/c/${gid}/${tid}` }, { text: "✅ 已阅/删除", callback_data: `inbox:del:${u.user_id}` }]] }
         });
-        await updUser(u.user_id, { user_info: { ...u.user_info, last_notify: now } }, env);
+        
+        // 4. 保存新的消息 ID
+        await updUser(u.user_id, { 
+            user_info: { ...u.user_info, last_notify: now, inbox_msg_id: newMsg.message_id } 
+        }, env);
+
     } catch (e) {
         if (e.message.includes("thread")) await setCfg('unread_topic_id', "", env);
     }
@@ -335,16 +353,15 @@ async function handleCallback(cb, env) {
     const { data, message: msg, from } = cb;
     const [act, p1, p2, p3] = data.split(':');
     
-    // [优化] 删除通知同时重置用户防抖时间
     if (act === 'inbox' && p1 === 'del') {
-        const targetUid = p2; // 从按钮获取用户ID
+        const targetUid = p2;
         await api(env.BOT_TOKEN, "deleteMessage", { chat_id: msg.chat.id, message_id: msg.message_id }).catch(()=>{});
-        // 重置防抖
+        // 重置防抖，允许立即推送新消息
         if (targetUid) {
             const u = await getUser(targetUid, env);
             await updUser(targetUid, { user_info: { ...u.user_info, last_notify: 0 } }, env);
         }
-        return api(env.BOT_TOKEN, "answerCallbackQuery", { callback_query_id: cb.id, text: "已处理，等待新消息" });
+        return api(env.BOT_TOKEN, "answerCallbackQuery", { callback_query_id: cb.id, text: "已处理" });
     }
 
     if (act === 'config') {
